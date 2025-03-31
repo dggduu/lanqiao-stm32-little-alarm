@@ -1,1 +1,1 @@
-const unsigned char _imgArr[28800]={0};
+//unsigned char _imgArr[28800];

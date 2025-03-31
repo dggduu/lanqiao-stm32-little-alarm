@@ -28,6 +28,7 @@
 /* USER CODE BEGIN Includes */
 #include "fuc.h"
 #include <lcd.h>
+extern unsigned char imgArr[28800];
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -45,6 +46,7 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */

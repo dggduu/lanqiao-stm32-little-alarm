@@ -3,8 +3,13 @@
 #include "usart.h"
 #include "gpio.h"
 #include <lcd.h>
+#include "dma.h"
+#include <stdio.h>
 
-extern const unsigned char _imgArr[28800];
+#define IMG_WIDTH 120
+#define IMG_HEIGHT 120
+unsigned char imgArr[IMG_WIDTH * IMG_HEIGHT * 2]={0};//ÉèÖÃÍ¼Æ¬»º³åÇø
+
 uint8_t img_number=0;
 uint8_t img_count=0;
 _Bool isImgUpdated =0;
@@ -19,20 +24,23 @@ _Bool img_direct_old=0;
 _Bool waitForDMA=0;
 uint8_t alarmming = 0;
 uint16_t btn_uwtick=0;
-_Bool rxFinished =1;
+
+uint8_t startRx=0,cleanFlash=0,receiving=0;
 
 uint8_t btn_index=0;//²âÊÔÓÃ
 RTC_TimeTypeDef  H_S_M_Time;//²»ÓÃÕâ¸öµÄ»°»áÓĞbug
 RTC_DateTypeDef  Y_M_D_Data;
 
-
 uint8_t alarm_h = 23,alarm_m = 30,alarm_s = 20,cursor = 0;//cursorÉèÖÃÄÖÖÓÓÃµÄÏÂ±ê 0:h; 1:min; 2:sec;
 uint8_t setAlarmed = 0;
+
+
 
 #define Scheduled ;
 
 void main_proc(){
 	key_proc();
+	dma_proc();
 	rtc_proc();
 	lcd_proc();
 	led_proc();
@@ -69,9 +77,26 @@ uint8_t key_scan()
 
 
 void dma_proc(){
-	Scheduled//»ùÓÚ´®¿ÚµÄ±³¾°Í¼Æ¬¸ü»»¹¦ÄÜ
+	if(cleanFlash && startRx == 2){
+		for(int i=0;i<sizeof(imgArr);i++){
+			imgArr[i]=0;
+		}
+		cleanFlash = 2;
+		isImgUpdated = 0;
+	}
+	if(startRx == 1) {
+		HAL_UARTEx_ReceiveToIdle_DMA(&huart1,imgArr,sizeof(imgArr));
+		receiving = 1;isImgUpdated = 0;
+	}
+	
 }
-
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size){
+	if(huart==&huart1){
+		startRx = 2;
+		isImgUpdated = 0;
+		receiving = 0;
+	}
+}
 	
 void setALarm(){
 	sAlarm.AlarmTime.Hours = alarm_h;
@@ -93,7 +118,7 @@ _Bool key4_pressed=0;
 uint16_t key4_tick=0;
 
 void key_proc(){
-	if(uwTick - btn_uwtick<=100) return ;
+	if(uwTick - btn_uwtick<=50) return ;
 	btn_uwtick = uwTick;
 	key_value = key_scan();
 	key_down = key_value&(key_value^key_old);
@@ -105,6 +130,9 @@ void key_proc(){
 			if(curr_page==0){//¿ØÖÆÓÎ±ê
 				cursor++;
 				cursor%=3;
+			}else{
+                    startRx++;
+					startRx %= 2;
 			}
 			break;
 		case 2://ÉèÖÃÄÖÖÓÊ±¼ä
@@ -114,15 +142,16 @@ void key_proc(){
 					case 0:alarm_h++;alarm_h%=24;break;
 					case 1:alarm_m++;alarm_m%=60;break;
 					case 2:alarm_s++;;alarm_s%=60;break;
+					}
+				}else{
+					cleanFlash++;
+					cleanFlash %= 2;
 				}
-			}
 			break;
 		case 3:
 			btn_index=3;
 			if(curr_page==1){//¿ØÖÆÍ¼Æ¬ÏÔÊ¾·½Ïò
-				img_direction++;
-				isImgUpdated = 0;
-				img_direction%=2;//0=Horizontal,1=Vertical
+				img_direction = (img_direction + 1) % 2;//0=Horizontal,1=Vertical
 			}else{
 				setAlarmed++;//ÆôÓÃ/¹Ø±ÕÄÖÖÓ¹¦ÄÜ
 				setAlarmed%=2;
@@ -155,15 +184,21 @@ void rtc_proc(){//¸üĞÂrtcÊ±ÖÓ
 	
 
 void LCD_showHPic(const uint8_t* pic_arr, uint8_t pic_x, uint8_t pic_y) {//Ë®Æ½ÏÔÊ¾Í¼Æ¬
-  LCD_SetCursor((240-pic_y)/2,(320-pic_x)/2); 
+  uint16_t start_x=(240-pic_y)/2,start_y=0;
+  LCD_SetCursor(start_x,start_y); 
   LCD_WriteRAM_Prepare();
   
-  for(int i=0;i<(pic_x*pic_y*2);i+=2){
-    if(i%(pic_x*2)==0){
-      for(uint8_t flesh=0;flesh<(320-pic_x);flesh++)
-        LCD_WriteRAM((uint16_t)0x00000);
+  for(uint16_t y=0;y<pic_y;y++){
+    for(uint16_t x=0;x<(320-pic_x)/2;x++){
+      LCD_WriteRAM(0x000000);
+    }//Ìî³ä×ó°ë±ß
+    for(uint16_t x=0;x<pic_x;x++){
+      uint16_t offset =(pic_x*y+x) * 2;
+      LCD_WriteRAM(pic_arr[offset+1]<<8|pic_arr[offset]);
     }
-    LCD_WriteRAM(pic_arr[i+1]<<8|pic_arr[i]);
+    for(uint16_t x=0;x<(320-pic_x)/2;x++){
+      LCD_WriteRAM(0x000000);
+    }//Ìî³äÓÒ°ë±ß
   }
   isImgUpdated=1;
 }
@@ -189,34 +224,36 @@ void LCD_showVPic(const uint8_t* pic_arr, uint8_t pic_x, uint8_t pic_y) {//´¹Ö±Ï
   isImgUpdated=1;
 }
 void alarm_page1_fuc(){//µ¹¼ÆÊ±¼ÆËã
-	uint16_t CurrSec = sTime.Hours * 3600 + sTime.Minutes * 60 + sTime.Seconds;
-	uint16_t alarmSec =  sAlarm.AlarmTime.Hours * 3600 + sAlarm.AlarmTime.Minutes * 60 + sAlarm.AlarmTime.Seconds;
+	uint32_t CurrSec = sTime.Hours * 3600 + sTime.Minutes * 60 + sTime.Seconds;
+	uint32_t alarmSec =  sAlarm.AlarmTime.Hours * 3600 + sAlarm.AlarmTime.Minutes * 60 + sAlarm.AlarmTime.Seconds;
 	
 	if(alarmSec < CurrSec){
 		alarmSec += 24*3600;
 	}
-	uint16_t leftSec = alarmSec - CurrSec;
+	uint32_t leftSec = alarmSec - CurrSec;
 	if(alarmming){
 		sprintf(lcd_buffer,"      TimeOut!                ");
 	}else{
-		sprintf(lcd_buffer,"Hour:%dMin:%dSec:%d     ",leftSec/3600,(leftSec%3600)/60,leftSec%60);
+		sprintf(lcd_buffer,"Hour:%2dMin:%2dSec:%2d     ",leftSec/3600,(leftSec%3600)/60,leftSec%60);
 	}
 }
 void lcd_proc(){
-	if(old_page!=curr_page||((img_direct_old != img_direction) && curr_page == 1)){//ÇĞÆÁÊ±Ë¢ĞÂÆÁÄ»»º³åÇø
+	uint8_t direction_changed = (img_direct_old != img_direction) && curr_page == 1;
+	if(old_page != curr_page || direction_changed){//ÇĞÆÁÊ±Ë¢ĞÂÆÁÄ»»º³åÇø
 		LCD_Clear(Black);
+		isImgUpdated = 0;
 	}
 	old_page = curr_page;
-	img_direct_old=img_direction;
+	img_direct_old = img_direction;
 	
 	HAL_RTC_GetTime(&hrtc,&sTime,RTC_FORMAT_BIN);
 	HAL_RTC_GetDate(&hrtc,&sDate,RTC_FORMAT_BIN);
 	if(curr_page){
-		if(!isImgUpdated){//Ö»äÖÈ¾Ò»´ÎÍ¼Æ¬ÒÔ¼õÉÙĞÔÄÜ¿ªÏú
+		if(!isImgUpdated && imgArr[0] != 0){//Ö»äÖÈ¾Ò»´ÎÍ¼Æ¬ÒÔ¼õÉÙĞÔÄÜ¿ªÏú
 			if(img_direction){
-				LCD_showHPic(_imgArr,120,120);
+				LCD_showHPic(imgArr,IMG_HEIGHT,IMG_WIDTH);//break point
 			}else{
-				LCD_showVPic(_imgArr,120,120);
+				LCD_showVPic(imgArr,IMG_HEIGHT,IMG_WIDTH);
 			}
 		}
 		if(setAlarmed||alarmming){
@@ -224,7 +261,7 @@ void lcd_proc(){
 		}else
 			sprintf(lcd_buffer,"   Plz set alarm      ");
 		LCD_DisplayStringLine(Line9,(u8*)lcd_buffer);
-		sprintf(lcd_buffer,"       H/V:%d                ",img_direction);
+		sprintf(lcd_buffer,"H/V:%d R:%d clen:%d b:%d                ",img_direction,startRx,cleanFlash,btn_index);
 		LCD_DisplayStringLine(Line0,(u8*)lcd_buffer);
 		fleshLed();//ĞŞ¸´ÇåÆÁÔì³ÉµÄledÒı½Å³åÍ»
 	}else{
